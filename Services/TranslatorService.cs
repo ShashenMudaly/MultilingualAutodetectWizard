@@ -90,56 +90,71 @@ namespace MAWTranslatorService.Services
 
         private async Task<T?> SendRequestAsync<T>(string route, object body)
         {
-            try
+            int maxRetries = 3;
+            int currentRetry = 0;
+            TimeSpan delay = TimeSpan.FromSeconds(1);
+
+            while (currentRetry < maxRetries)
             {
-                var request = new HttpRequestMessage(HttpMethod.Post, route);
-                request.Headers.Add("Ocp-Apim-Subscription-Key", _config.ApiKey);
-                request.Headers.Add("Ocp-Apim-Subscription-Region", _config.Region);
-                
-                var jsonBody = JsonSerializer.Serialize(body);
-                _logger.LogInformation("Full Request URL: {Url}", request.RequestUri);
-                _logger.LogInformation("Request Body: {JsonBody}", jsonBody);
-                _logger.LogInformation("API Key (first 4 chars): {KeyPrefix}", _config.ApiKey?[..Math.Min(4, _config.ApiKey?.Length ?? 0)]);
-                _logger.LogInformation("Region: {Region}", _config.Region);
-                
-                request.Content = new StringContent(
-                    jsonBody,
-                    Encoding.UTF8,
-                    "application/json"
-                );
-
-                var response = await _httpClient.SendAsync(request);
-                var content = await response.Content.ReadAsStringAsync();
-                
-                _logger.LogInformation("Response Status: {Status}", response.StatusCode);
-                _logger.LogInformation("Response Content: {Content}", content);
-                _logger.LogInformation("Response Headers: {@Headers}", response.Headers);
-
-                if (!response.IsSuccessStatusCode)
+                try
                 {
-                    _logger.LogError("API request failed with status {StatusCode}. Error: {Error}", 
-                        response.StatusCode, content);
+                    var request = new HttpRequestMessage(HttpMethod.Post, route);
+                    request.Headers.Add("Ocp-Apim-Subscription-Key", _config.ApiKey);
+                    request.Headers.Add("Ocp-Apim-Subscription-Region", _config.Region);
                     
-                    throw new HttpRequestException(
-                        $"Translation API request failed with status {response.StatusCode}: {content}");
+                    var jsonBody = JsonSerializer.Serialize(body);
+                    _logger.LogInformation("Full Request URL: {Url}", request.RequestUri);
+                    _logger.LogInformation("Request Body: {JsonBody}", jsonBody);
+                    _logger.LogInformation("API Key (first 4 chars): {KeyPrefix}", _config.ApiKey?[..Math.Min(4, _config.ApiKey?.Length ?? 0)]);
+                    _logger.LogInformation("Region: {Region}", _config.Region);
+                    
+                    request.Content = new StringContent(
+                        jsonBody,
+                        Encoding.UTF8,
+                        "application/json"
+                    );
+
+                    var response = await _httpClient.SendAsync(request);
+                    var content = await response.Content.ReadAsStringAsync();
+                    
+                    _logger.LogInformation("Response Status: {Status}", response.StatusCode);
+                    _logger.LogInformation("Response Content: {Content}", content);
+                    _logger.LogInformation("Response Headers: {@Headers}", response.Headers);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogError("API request failed with status {StatusCode}. Error: {Error}", 
+                            response.StatusCode, content);
+                        
+                        throw new HttpRequestException(
+                            $"Translation API request failed with status {response.StatusCode}: {content}");
+                    }
+
+                    var options = new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true,
+                        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                    };
+
+                    var result = JsonSerializer.Deserialize<T>(content, options);
+                    _logger.LogInformation("Deserialized Result: {@Result}", result);
+
+                    return result;
                 }
-
-                var options = new JsonSerializerOptions
+                catch (HttpRequestException ex) when (ex.Message.Contains("429"))
                 {
-                    PropertyNameCaseInsensitive = true,
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-                };
+                    currentRetry++;
+                    if (currentRetry == maxRetries) throw;
 
-                var result = JsonSerializer.Deserialize<T>(content, options);
-                _logger.LogInformation("Deserialized Result: {@Result}", result);
+                    _logger.LogWarning("Rate limit hit, waiting {Delay} seconds before retry {Retry}/{MaxRetries}", 
+                        delay.TotalSeconds, currentRetry, maxRetries);
+                    
+                    await Task.Delay(delay);
+                    delay *= 2; // Exponential backoff
+                }
+            }
 
-                return result;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Request failed for route {Route} with error: {Error}", route, ex.Message);
-                throw;
-            }
+            return default;
         }
 
         private class DetectResponse
